@@ -221,7 +221,7 @@ class DownloadFragment : Fragment() {
 
             addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
                 override fun onTabSelected(tab: TabLayout.Tab?) {
-                    binding.swipeContainer.isEnabled = isOnDownloads
+                    binding.swipeContainer.isEnabled = binding.bookmarkTabs.selectedTabPosition == 0
                     viewModel.switchPage(binding.bookmarkTabs.selectedTabPosition)
                 }
 
@@ -322,7 +322,7 @@ class DownloadFragment : Fragment() {
             override fun onPageScrollStateChanged(state: Int) {
                 super.onPageScrollStateChanged(state)
                 binding.swipeContainer.isEnabled =
-                    isOnDownloads && state != ViewPager2.SCROLL_STATE_DRAGGING
+                    isOnDownloads && state == ViewPager2.SCROLL_STATE_IDLE
             }
         })
 
