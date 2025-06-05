@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper
 import com.fasterxml.jackson.module.kotlin.KotlinFeature
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.lagradost.quicknovel.mvvm.logError
+import androidx.core.content.edit
 
 const val PREFERENCES_NAME: String = "rebuild_preference"
 const val DOWNLOAD_FOLDER: String = "downloads_data"
@@ -30,6 +31,9 @@ const val EPUB_TEXT_PADDING: String = "reader_epub_text_padding"
 const val EPUB_TEXT_PADDING_TOP: String = "reader_epub_text_padding_top"
 const val EPUB_HAS_BATTERY: String = "reader_epub_has_battery"
 const val EPUB_KEEP_SCREEN_ACTIVE: String = "reader_epub_keep_screen_active"
+const val EPUB_SLEEP_TIMER: String = "reader_epub_tts_timer"
+const val EPUB_ML_FROM_LANGUAGE: String = "reader_epub_ml_from"
+const val EPUB_ML_TO_LANGUAGE: String = "reader_epub_ml_to"
 const val EPUB_HAS_TIME: String = "reader_epub_has_time"
 const val EPUB_TWELVE_HOUR_TIME: String = "reader_epub_twelve_hour_time"
 const val EPUB_FONT: String = "reader_epub_font"
@@ -39,6 +43,7 @@ const val EPUB_READER_TYPE: String = "reader_reader_type"
 const val EPUB_CURRENT_POSITION: String = "reader_epub_position"
 const val EPUB_CURRENT_POSITION_SCROLL: String = "reader_epub_position_scroll"
 const val EPUB_CURRENT_POSITION_SCROLL_CHAR: String = "reader_epub_position_scroll_char"
+const val EPUB_CURRENT_ML: String = "reader_epub_ml"
 const val EPUB_CURRENT_POSITION_READ_AT: String = "reader_epub_position_read"
 const val RESULT_BOOKMARK: String = "result_bookmarked"
 const val RESULT_BOOKMARK_STATE: String = "result_bookmarked_state"
@@ -154,9 +159,9 @@ object DataStore {
 
     fun <T> Context.setKey(path: String, value: T) {
         try {
-            val editor: SharedPreferences.Editor = getSharedPrefs().edit()
-            editor.putString(path, mapper.writeValueAsString(value))
-            editor.apply()
+            getSharedPrefs().edit {
+                putString(path, mapper.writeValueAsString(value))
+            }
         } catch (e: Exception) {
             logError(e)
         }

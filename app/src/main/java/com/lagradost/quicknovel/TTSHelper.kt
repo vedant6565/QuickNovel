@@ -453,7 +453,7 @@ object TTSHelper {
     private fun parseSpan(
         unsegmented: Spanned,
         index: Int,
-    ): List<TextSpan> {
+    ): ArrayList<TextSpan> {
         val spans: ArrayList<TextSpan> = ArrayList()
 
         var currentOffset = 0
@@ -555,7 +555,7 @@ object TTSHelper {
     fun parseTextToSpans(
         render: Spanned,
         index: Int
-    ): List<TextSpan> {
+    ): ArrayList<TextSpan> {
         return parseSpan(render, index)
     }
 
@@ -571,7 +571,7 @@ object TTSHelper {
                 "([ \"“‘'])(Dr|Mr|Mrs)\\. ([A-Z])".toRegex(),
                 "$1$2, $3"
             )
-
+        println("SIZE: ${text.length}")
         debugAssert({ cleanText.length != text.length }) {
             "TTS requires same length"
         }
