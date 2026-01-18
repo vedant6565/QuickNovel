@@ -86,6 +86,7 @@ class MainPageFragment : Fragment() {
         setupGridView()
     }
 
+    private var lastId : Int = -1 // dirty fix
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         val apiName = requireArguments().getString("apiName")!!
 
@@ -157,7 +158,7 @@ class MainPageFragment : Fragment() {
         setupGridView()
 
         binding.mainpageList.apply {
-            val mainPageAdapter = MainAdapter2(this, this@MainPageFragment, 1)
+            val mainPageAdapter = MainAdapter2(this, 1)
             adapter = mainPageAdapter
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
@@ -195,8 +196,15 @@ class MainPageFragment : Fragment() {
                         val value = data.value
                         binding.mainpageLoading.isVisible = false
                         binding.mainpageLoadingError.isVisible = false
+                        mainPageAdapter.submitList(value.items)
 
-                        mainPageAdapter.submitList(value)
+                        // this is needed to fix the scroll issue when value.size % 3 == 0
+                        if (value.pages == 1 && lastId != value.id) {
+                            lastId = value.id
+                            binding.mainpageList.post {
+                                binding.mainpageList.scrollToPosition(0)
+                            }
+                        }
                         binding.mainpageList.isInvisible = false
                         //binding.mainpageList.isVisible = true
                         // mainPageAdapter.setLoading(false)

@@ -13,6 +13,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -26,9 +27,14 @@ import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import androidx.core.net.toUri
 import androidx.preference.PreferenceManager
-import com.bumptech.glide.Glide
+import coil3.Extras
+import coil3.SingletonImageLoader
+import coil3.asDrawable
+import coil3.request.ImageRequest
+import coil3.request.SuccessResult
 import com.lagradost.quicknovel.BaseApplication.Companion.context
 import com.lagradost.quicknovel.BaseApplication.Companion.getKey
 import com.lagradost.quicknovel.BaseApplication.Companion.getKeys
@@ -36,6 +42,7 @@ import com.lagradost.quicknovel.BaseApplication.Companion.removeKey
 import com.lagradost.quicknovel.BaseApplication.Companion.setKey
 import com.lagradost.quicknovel.BookDownloader2.LOCAL_EPUB
 import com.lagradost.quicknovel.BookDownloader2.LOCAL_EPUB_MIN_SIZE
+import com.lagradost.quicknovel.BookDownloader2Helper.IMPORT_SOURCE
 import com.lagradost.quicknovel.BookDownloader2Helper.createQuickStream
 import com.lagradost.quicknovel.BookDownloader2Helper.generateId
 import com.lagradost.quicknovel.BookDownloader2Helper.getDirectory
@@ -46,7 +53,7 @@ import com.lagradost.quicknovel.ImageDownloader.getImageBitmapFromUrl
 import com.lagradost.quicknovel.NotificationHelper.etaToString
 import com.lagradost.quicknovel.extractors.ExtractorApi
 import com.lagradost.quicknovel.mvvm.logError
-import com.lagradost.quicknovel.services.DownloadService
+import com.lagradost.quicknovel.ui.UiImage
 import com.lagradost.quicknovel.ui.download.DownloadFragment
 import com.lagradost.quicknovel.ui.settings.SettingsFragment.Companion.getBasePath
 import com.lagradost.quicknovel.ui.settings.SettingsFragment.Companion.getDefaultDir
@@ -57,17 +64,21 @@ import com.lagradost.quicknovel.util.Event
 import com.lagradost.quicknovel.util.ResultCached
 import com.lagradost.quicknovel.util.UIHelper.colorFromAttribute
 import com.lagradost.quicknovel.util.pmap
+import com.lagradost.safefile.SafeFile
+import me.ag2s.epublib.domain.Author
+import me.ag2s.epublib.domain.EpubBook
+import me.ag2s.epublib.domain.MediaType
+import me.ag2s.epublib.domain.Resource
+import me.ag2s.epublib.epub.EpubWriter
+import me.ag2s.epublib.domain.MediaTypes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import io.documentnode.epub4j.domain.Author
-import io.documentnode.epub4j.domain.Book
-import io.documentnode.epub4j.domain.MediaType
-import io.documentnode.epub4j.domain.MediaTypes
-import io.documentnode.epub4j.domain.Resource
-import io.documentnode.epub4j.epub.EpubWriter
+import me.ag2s.epublib.epub.EpubReader
+import me.ag2s.epublib.util.zip.AndroidZipFile
 import java.io.File
 import java.io.IOException
 
@@ -79,14 +90,19 @@ enum class DownloadActionType {
 }
 
 data class DownloadProgress(
-    val progress: Int,
-    val total: Int,
+    val progress: Long,
+    val total: Long,
+    val downloaded: Long,
 )
 
 data class DownloadProgressState(
     var state: DownloadState,
-    var progress: Int,
-    var total: Int,
+    // How many chapters/bytes much have we downloaded, not including skipped chapters
+    var progress: Long,
+    // How many have we actually downloaded
+    var downloaded: Long,
+    // How many is there in total
+    var total: Long,
     var lastUpdatedMs: Long,
     var etaMs: Long?
 ) {
@@ -127,6 +143,7 @@ data class QuickStreamData(
 )
 
 object BookDownloader2Helper {
+    const val IMPORT_SOURCE = "Download"
     private val fs = File.separatorChar
     private const val reservedChars = "|\\?*<\":>+[]/'"
     fun sanitizeFilename(name: String): String {
@@ -147,6 +164,36 @@ object BookDownloader2Helper {
 
     fun getFilenameIMG(apiName: String, author: String, name: String): String {
         return "$fs$apiName$fs$author$fs$name${fs}poster.jpg".replace("$fs$fs", "$fs")
+    }
+
+    private val cachedBitmaps = hashMapOf<String, Bitmap>()
+    fun getCachedBitmap(
+        activity: Activity?,
+        apiName: String,
+        author: String?,
+        name: String
+    ): Bitmap? {
+        try {
+            val filePath = getFilenameIMG(
+                sanitizeFilename(apiName),
+                sanitizeFilename(author ?: ""),
+                sanitizeFilename(name)
+            )
+
+            val existing = cachedBitmaps.get(filePath)
+            if (existing != null) return existing
+            if (activity == null) return null
+
+            val file = activity.filesDir.toString() + filePath
+            val data = File(file).readBytes()
+            val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size)
+            cachedBitmaps[filePath] = bitmap
+
+            return bitmap
+        } catch (t: Throwable) {
+            logError(t)
+            return null
+        }
     }
 
     fun generateId(apiName: String, author: String?, name: String): Int {
@@ -208,8 +255,7 @@ object BookDownloader2Helper {
             val fileUri =
                 cr.getExistingDownloadUriOrNullQ(relativePath, displayName) ?: return false
             val fileLength = cr.getFileLength(fileUri) ?: return false
-            if (fileLength == 0L) return false
-            return true
+            return fileLength != 0L
         } else {
             val normalPath =
                 "${Environment.getExternalStorageDirectory()}${fs}$relativePath$displayName"
@@ -258,7 +304,7 @@ object BookDownloader2Helper {
             val sApiName = sanitizeFilename(apiName)
             val sAuthor = if (author == null) "" else sanitizeFilename(author)
             val sName = sanitizeFilename(name)
-            val id = "$sApiName$sAuthor$sName".hashCode()
+            val id = generateId(apiName, author, name)
 
             val dir =
                 File(
@@ -268,6 +314,7 @@ object BookDownloader2Helper {
             removeKey(DOWNLOAD_SIZE, id.toString())
             removeKey(DOWNLOAD_TOTAL, id.toString())
             removeKey(DOWNLOAD_EPUB_SIZE, id.toString())
+            removeKey(DOWNLOAD_OFFSET, id.toString())
 
             if (dir.isDirectory) {
                 dir.deleteRecursively()
@@ -299,22 +346,43 @@ object BookDownloader2Helper {
                 ), LOCAL_EPUB
             )
 
-            val count =
+            val (count, downloaded) =
                 if (epub.exists()) {
                     val length = epub.length()
                     if (length > LOCAL_EPUB_MIN_SIZE) {
-                        1
+                        1 to 1
                     } else {
-                        0
+                        0 to 0
                     }
                 } else {
-                    File(
+                    val existingFiles = File(
                         context.filesDir.toString() + getDirectory(
                             sApiname,
                             sAuthor,
                             sName
                         )
-                    ).listFiles()?.count { it.name.endsWith(".txt") } ?: return null
+                    ).listFiles()?.mapNotNull { it.nameWithoutExtension.toIntOrNull() }?.sorted()
+
+                    if (existingFiles.isNullOrEmpty()) {
+                        0 to 0
+                    } else {
+                        // find first continued subsequence after DOWNLOAD_OFFSET
+                        // and mark downloaded as <= sequence end
+                        val start = getKey<Int>(DOWNLOAD_OFFSET, id.toString()) ?: 0
+                        val startIndex = maxOf(existingFiles.indexOfFirst { x -> x >= start }, 0)
+                        var last = existingFiles[startIndex]
+                        var downloads = startIndex + 1
+                        for (i in startIndex + 1 until existingFiles.size) {
+                            if (existingFiles[i] == last + 1) {
+                                downloads += 1
+                                last = existingFiles[i]
+                            } else {
+                                break
+                            }
+                        }
+
+                        (last + 1) to downloads
+                    }
                 }
             if (count <= 0) return null
 
@@ -347,7 +415,7 @@ object BookDownloader2Helper {
 
             setKey(DOWNLOAD_SIZE, id.toString(), count)
             val total = getKey<Int>(DOWNLOAD_TOTAL, id.toString()) ?: return null
-            return DownloadProgress(count, total)
+            return DownloadProgress(count.toLong(), total.toLong(), downloaded.toLong())
         } catch (e: Exception) {
             return null
         }
@@ -655,7 +723,7 @@ object BookDownloader2Helper {
                 setKey(DOWNLOAD_EPUB_SIZE, id.toString(), 1)
             } else {
 
-                val book = Book()
+                val book = EpubBook()
                 val metadata = book.metadata
                 if (author != null) {
                     metadata.addAuthor(Author(author))
@@ -677,8 +745,14 @@ object BookDownloader2Helper {
                 val stripHtml = activity.getStripHtml()
                 val head = activity.filesDir.toString()
                 val dir = File(head + getDirectory(sApiName, sAuthor, sName))
+                // do not include chapters that are stream read downloaded in partial chapter generation
+                val start = getKey<Int>(DOWNLOAD_OFFSET, id.toString()) ?: 0
+                val chapters = dir.listFiles()?.toList()?.mapNotNull { fileName ->
+                    fileName.nameWithoutExtension.toIntOrNull() ?: return@mapNotNull null
+                }?.filter { x -> x >= start }?.sorted()
 
-                (0..(dir.listFiles()?.size ?: 0)).pmap { threadIndex ->
+                chapters?.pmap { threadIndex ->
+
                     val filepath =
                         head + getFilename(
                             sApiName,
@@ -697,22 +771,24 @@ object BookDownloader2Helper {
                         threadIndex,
                         chap.title
                     )
-                }.sortedBy {
+                }?.sortedBy {
                     it?.second
-                }.also { list ->
+                }?.also { list ->
                     if (list.isEmpty()) {
                         throw ErrorLoadingException("Unable to create an empty book")
                     }
-                }.forEach { chapter ->
+                }?.forEach { chapter ->
                     if (chapter == null) {
                         return@forEach
                     }
                     book.addSection(chapter.third, chapter.first)
                 }
 
+                val largestChapter = chapters?.maxOrNull()?.plus(1) ?: 0
+
                 val epubWriter = EpubWriter()
                 epubWriter.write(book, fileStream)
-                setKey(DOWNLOAD_EPUB_SIZE, id.toString(), book.contents.size)
+                setKey(DOWNLOAD_EPUB_SIZE, id.toString(), largestChapter)
             }
             fileStream.close()
         } catch (e: Exception) {
@@ -860,15 +936,15 @@ object NotificationHelper {
 
             if (state == DownloadState.IsDownloading || state == DownloadState.IsPaused) {
                 builder.setProgress(
-                    stateProgressState.total,
-                    stateProgressState.progress,
+                    stateProgressState.total.toInt(),
+                    stateProgressState.progress.toInt(),
                     stateProgressState.total <= 1
                 )
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 load.posterUrl?.let { url ->
-                    val poster = getImageBitmapFromUrl(url)
+                    val poster = context.getImageBitmapFromUrl(url)
                     if (poster != null)
                         builder.setLargeIcon(poster)
                 }
@@ -889,9 +965,9 @@ object NotificationHelper {
 
                 // ADD ACTIONS
                 for ((index, i) in actionTypes.withIndex()) {
-                    val _resultIntent = Intent(context, DownloadService::class.java)
+                    val resultIntent = Intent(context, DownloadNotificationService::class.java)
 
-                    _resultIntent.putExtra(
+                    resultIntent.putExtra(
                         "type", when (i) {
                             DownloadActionType.Resume -> "resume"
                             DownloadActionType.Pause -> "pause"
@@ -899,12 +975,12 @@ object NotificationHelper {
                         }
                     )
 
-                    _resultIntent.putExtra("id", id)
+                    resultIntent.putExtra("id", id)
 
                     val pending: PendingIntent =
                         PendingIntent.getService(
                             context, 4337 + index + id,
-                            _resultIntent,
+                            resultIntent,
                             PendingIntent.FLAG_UPDATE_CURRENT or
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
                                         PendingIntent.FLAG_MUTABLE else 0
@@ -947,30 +1023,42 @@ object ImageDownloader {
     private val cachedBitmapMutex = Mutex()
     private val cachedBitmaps = hashMapOf<String, Bitmap>()
 
-    suspend fun getImageBitmapFromUrl(url: String): Bitmap? {
+    suspend fun Context.getImageBitmapFromUrl(url: String, headers: Map<String, String>? = null): Bitmap? {
         try {
-            cachedBitmapMutex.withLock {
+            with(cachedBitmapMutex) {
                 if (cachedBitmaps.containsKey(url)) {
                     return cachedBitmaps[url]
                 }
             }
 
-            val bitmap =
-                withContext(Dispatchers.IO) {
-                    Glide.with(activity ?: return@withContext null)
-                        .asBitmap()
-                        .load(url).submit(720, 720).get()
-                } ?: return null
+            val imageLoader = SingletonImageLoader.get(this)
 
-            cachedBitmapMutex.withLock {
-                cachedBitmaps[url] = bitmap
+            val request = ImageRequest.Builder(this)
+                .data(url)
+                .apply {
+                    headers?.forEach { (key, value) ->
+                        extras[Extras.Key<String>(key)] = value
+                    }
+                }
+                .build()
+
+            val bitmap = runBlocking {
+                val result = imageLoader.execute(request)
+                (result as? SuccessResult)?.image?.asDrawable(applicationContext.resources)
+                    ?.toBitmap()
             }
+
+            bitmap?.let {
+                with(cachedBitmapMutex) {
+                    cachedBitmaps[url] = it
+                }
+            }
+
             return bitmap
-        } catch (t: Throwable) {
-            logError(t)
+        } catch (e: Exception) {
+            logError(e)
             return null
         }
-
     }
 }
 
@@ -996,7 +1084,7 @@ object BookDownloader2 {
 
     @WorkerThread
     suspend fun stream(res: EpubResponse, apiName: String) {
-        downloadAsync(res, getApiFromName(apiName))
+        downloadWorkThread(res, getApiFromName(apiName))
         readEpub(res.author, res.name, apiName, res.synopsis)
     }
 
@@ -1200,11 +1288,12 @@ object BookDownloader2 {
                     downloadData[localId] = res
 
                     downloadProgress[localId] = DownloadProgressState(
-                        DownloadState.Nothing,
-                        info.progress,
-                        info.total,
-                        System.currentTimeMillis(),
-                        null
+                        state = DownloadState.Nothing,
+                        progress = info.progress,
+                        total = info.total,
+                        downloaded = info.downloaded,
+                        lastUpdatedMs = System.currentTimeMillis(),
+                        etaMs = null
                     )
                 }
             }
@@ -1213,8 +1302,8 @@ object BookDownloader2 {
         downloadDataRefreshed.invoke(0)
     }
 
-    private val currentDownloadsMutex = Mutex()
-    private val currentDownloads: HashSet<Int> = hashSetOf()
+    val currentDownloadsMutex = Mutex()
+    val currentDownloads: HashSet<Int> = hashSetOf()
 
     private val pendingActionMutex = Mutex()
     private val pendingAction: HashMap<Int, DownloadActionType> = hashMapOf()
@@ -1288,6 +1377,11 @@ object BookDownloader2 {
         )
 
         setKey(
+            DOWNLOAD_OFFSET, to.toString(),
+            getKey<Int>(DOWNLOAD_OFFSET, from.toString())
+        )
+
+        setKey(
             HISTORY_FOLDER, to.toString(),
             getKey<ResultCached>(HISTORY_FOLDER, from.toString())
         )
@@ -1316,6 +1410,11 @@ object BookDownloader2 {
         )
 
         setKey(
+            EPUB_CURRENT_POSITION_CHAPTER, newName,
+            getKey<String>(EPUB_CURRENT_POSITION_CHAPTER, oldName)
+        )
+
+        setKey(
             EPUB_CURRENT_POSITION_SCROLL, newName,
             getKey<Int>(EPUB_CURRENT_POSITION_SCROLL, oldName)
         )
@@ -1327,11 +1426,14 @@ object BookDownloader2 {
 
     private val migrationNovelMutex = Mutex()
 
-    // this is suspended because we want to as fast as possible set the card to pending before starting the multithreaded startup
-    // because this called from a for loop, the locks wont be a problem
-    suspend fun downloadFromCard(
+    @WorkerThread
+    suspend fun downloadWorkThread(
         card: DownloadFragment.DownloadDataLoaded,
     ) {
+        if(card.isImported) {
+            return
+        }
+
         currentDownloadsMutex.withLock {
             if (currentDownloads.contains(card.id)) {
                 return
@@ -1347,7 +1449,7 @@ object BookDownloader2 {
             }
         }
 
-        ioSafe {
+        try {
             val api = getApiFromName(card.apiName)
             val data = api.load(card.source, allowCache = false)
 
@@ -1373,9 +1475,20 @@ object BookDownloader2 {
                         deleteNovelAsync(card.author, card.name, card.apiName)
                     }
                 }
-                download(
-                    res, api
-                )
+
+                when (res) {
+                    is EpubResponse -> {
+                        downloadWorkThread(
+                            res, api
+                        )
+                    }
+
+                    is StreamResponse -> {
+                        downloadWorkThread(
+                            res, api
+                        )
+                    }
+                }
             } else {
                 // failed to get, but not inside download function, so fail here
                 downloadInfoMutex.withLock {
@@ -1386,26 +1499,29 @@ object BookDownloader2 {
                     }
                 }
             }
+        } catch (t: Throwable) {
+            logError(t)
         }
     }
 
-
-    fun download(load: LoadResponse, api: APIRepository) {
-        when (load) {
-            is StreamResponse -> {
-                download(load, api, 0 until load.data.size)
-            }
-
-            is EpubResponse -> {
-                download(load, api)
-            }
-
-            else -> throw NotImplementedError()
-        }
-    }
-
-    private suspend fun setSuffixData(load: LoadResponse, api: APIRepository) {
+    fun changeDownloadStart(load: LoadResponse, api: APIRepository, to: Int?) {
         val id = generateId(load, api.name)
+        if (to == null) {
+            removeKey(DOWNLOAD_OFFSET, id.toString())
+            return
+        }
+
+        setKey(
+            DOWNLOAD_OFFSET, id.toString(), to,
+        )
+    }
+
+    fun download(load: LoadResponse, context: Context) {
+        DownloadFileWorkManager.download(load, context)
+    }
+
+    private suspend fun setSuffixData(load: LoadResponse, apiName: String) {
+        val id = generateId(load, apiName)
 
         val newData = DownloadFragment.DownloadData(
             load.url,
@@ -1417,7 +1533,7 @@ object BookDownloader2 {
             load.views,
             load.synopsis,
             load.tags,
-            api.name,
+            apiName,
             System.currentTimeMillis(),
             System.currentTimeMillis()
         )
@@ -1432,8 +1548,13 @@ object BookDownloader2 {
         }
     }
 
-    private suspend fun setPrefixData(load: LoadResponse, api: APIRepository, total: Int) {
-        val id = generateId(load, api.name)
+    private suspend fun setPrefixData(
+        load: LoadResponse,
+        apiName: String,
+        total: Long,
+        downloaded: Long
+    ) {
+        val id = generateId(load, apiName)
 
         // cant download the same thing twice at the same time
         currentDownloadsMutex.withLock {
@@ -1455,7 +1576,7 @@ object BookDownloader2 {
             load.views,
             load.synopsis,
             load.tags,
-            api.name,
+            apiName,
             System.currentTimeMillis(),
             prevDownloadData?.lastDownloaded
         )
@@ -1472,12 +1593,22 @@ object BookDownloader2 {
                 this.total = total
                 downloadProgressChanged.invoke(id to this)
             } ?: run {
+
+                /*state = DownloadState.Nothing,
+                progress = info.progress,
+                total = info.total,
+                downloaded = info.downloaded,
+                lastUpdatedMs = System.currentTimeMillis(),
+                etaMs = null*/
+
+
                 downloadProgress[id] = DownloadProgressState(
-                    DownloadState.IsPending,
-                    0,
-                    total,
-                    System.currentTimeMillis(),
-                    null
+                    state = DownloadState.IsPending,
+                    progress = 0,
+                    total = total,
+                    lastUpdatedMs = System.currentTimeMillis(),
+                    etaMs = null,
+                    downloaded = downloaded,
                 ).also {
                     downloadProgressChanged.invoke(id to it)
                 }
@@ -1488,21 +1619,92 @@ object BookDownloader2 {
     const val LOCAL_EPUB: String = "local_epub.epub"
     const val LOCAL_EPUB_MIN_SIZE: Long = 1000
 
+    @WorkerThread
+    @Throws
+    suspend fun downloadWorkThread(data: Uri, context: Context) {
+        val filesDir = activity?.filesDir ?: return
+        val fd = context.contentResolver.openFileDescriptor(data, "r")
+            ?: throw ErrorLoadingException("Unable to open file descriptor")
+        val zipFile = AndroidZipFile(fd, "")
+        val book = EpubReader().readEpubLazy(zipFile, "utf-8")
+            ?: throw ErrorLoadingException("No epub found")
 
-    fun download(load: EpubResponse, api: APIRepository) = ioSafe {
-        downloadAsync(load, api)
+        val author = book.metadata.authors.firstOrNull()
+            ?.let { "${it.firstname ?: ""} ${it.lastname}".trim() }
+        val apiName = IMPORT_SOURCE
+        val name = book.metadata.firstTitle ?: ""
+        val sApiName = BookDownloader2Helper.sanitizeFilename(apiName)
+        val sAuthor = BookDownloader2Helper.sanitizeFilename(author ?: "")
+        val sName = BookDownloader2Helper.sanitizeFilename(name)
+
+        val id = generateId(apiName, author, name)
+
+        val load = EpubResponse(
+            url = "",
+            name = name,
+            apiName = apiName,
+            downloadLinks = emptyList(),
+            downloadExtractLinks = emptyList()
+        ).apply {
+            this.author = author
+        }
+
+        try {
+            setPrefixData(load, apiName, 1L, 0L)
+
+            try {
+                val coverBytes = book.coverImage?.data
+                if (coverBytes != null) {
+                    // Store the image and override it
+                    val filepath = BookDownloader2Helper.getFilenameIMG(sApiName, sAuthor, sName)
+                    val posterFilepath =
+                        filesDir.toString() + filepath
+                    val pFile = File(posterFilepath)
+                    pFile.parentFile?.mkdirs()
+                    pFile.writeBytes(coverBytes)
+                }
+            } catch (t: Throwable) {
+                logError(t)
+            }
+
+            val file =
+                File(filesDir.toString() + getDirectory(sApiName, sAuthor, sName), LOCAL_EPUB)
+
+            file.parentFile?.mkdirs()
+            file.createNewFile()
+            file.writeBytes(
+                context.contentResolver.openInputStream(data)?.readBytes()
+                    ?: throw IOException("No file found")
+            )
+
+            setSuffixData(load, apiName)
+            changeDownload(id) {
+                state = DownloadState.IsDone
+                this.progress = this.total
+                this.downloaded = this.total
+            }?.let { newProgressState ->
+                createNotification(
+                    id,
+                    load,
+                    newProgressState
+                )
+            }
+        } finally {
+            currentDownloadsMutex.withLock {
+                currentDownloads -= id
+            }
+        }
     }
 
     @WorkerThread
-    suspend fun downloadAsync(load: EpubResponse, api: APIRepository) {
+    suspend fun downloadWorkThread(load: EpubResponse, api: APIRepository) {
         val filesDir = activity?.filesDir ?: return
         val sApiName = BookDownloader2Helper.sanitizeFilename(api.name)
-        val author = load.author
         val sAuthor = BookDownloader2Helper.sanitizeFilename(load.author ?: "")
         val sName = BookDownloader2Helper.sanitizeFilename(load.name)
         val id = generateId(load, api.name)
 
-        setPrefixData(load, api, 1)
+        setPrefixData(load, api.name, 1L, 0L)
 
         try {
             // 1. download the image
@@ -1530,7 +1732,7 @@ object BookDownloader2 {
                 )
             }
 
-            var links = ExtractorApi.extract(load.links)
+            var links = ExtractorApi.extract(load.downloadExtractLinks + load.downloadLinks)
             links = links.sortedByDescending { it.kbPerSec }
             //println("links $links")
             for (link in links) {
@@ -1574,7 +1776,7 @@ object BookDownloader2 {
                     continue
                 }
 
-                val length = stream.contentLength().toInt()
+                val length = stream.contentLength()
 
                 if (length <= LOCAL_EPUB_MIN_SIZE) {
                     delay(api.rateLimitTime + 1000)
@@ -1582,7 +1784,7 @@ object BookDownloader2 {
                 }
 
                 val totalBytes = ArrayList<Byte>()
-                var progress = 0
+                var progress = 0L
                 val startedTime = System.currentTimeMillis()
                 file.parentFile?.mkdirs()
                 file.createNewFile()
@@ -1596,11 +1798,12 @@ object BookDownloader2 {
                         val currentTime = System.currentTimeMillis()
                         val totalTimeSoFar = currentTime - startedTime
                         val state = DownloadProgressState(
-                            DownloadState.IsDownloading,
-                            progress,
-                            total,
-                            currentTime,
-                            maxOf(((totalTimeSoFar * total) / progress) - totalTimeSoFar, 0)
+                            state = DownloadState.IsDownloading,
+                            progress = progress,
+                            total = total,
+                            downloaded = progress,
+                            lastUpdatedMs = currentTime,
+                            etaMs = maxOf(((totalTimeSoFar * total) / progress) - totalTimeSoFar, 0)
                         )
 
                         run {
@@ -1649,11 +1852,12 @@ object BookDownloader2 {
 
                 file.writeBytes(totalBytes.toByteArray())
 
-                setSuffixData(load, api)
+                setSuffixData(load, api.name)
 
                 changeDownload(id) {
                     state = DownloadState.IsDone
                     this.progress = this.total
+                    this.downloaded = this.total
                 }?.let { newProgressState ->
                     createNotification(
                         id,
@@ -1681,6 +1885,7 @@ object BookDownloader2 {
         }
     }
 
+    @WorkerThread
     private suspend fun downloadImage(
         load: LoadResponse,
         sApiName: String,
@@ -1696,7 +1901,7 @@ object BookDownloader2 {
                 val pFile = File(posterFilepath)
 
                 val posterUrl = load.posterUrl
-                // dont need to redownload the image every time
+                // don't need to redownload the image every time
                 if ((!pFile.exists() || getKey<String>(
                         filepath,
                         posterUrl
@@ -1717,8 +1922,24 @@ object BookDownloader2 {
         }
     }
 
-    fun download(load: StreamResponse, api: APIRepository, range: ClosedRange<Int>) = ioSafe {
-        val filesDir = activity?.filesDir ?: return@ioSafe
+    @WorkerThread
+    suspend fun downloadWorkThread(load: StreamResponse, api: APIRepository) {
+        val id = generateId(load, api.name)
+        val desiredStart = (
+                getKey<Int>(
+                    DOWNLOAD_OFFSET, id.toString(),
+                ) ?: 0
+                ).coerceIn(0, load.data.size)
+        downloadWorkThread(load, api, desiredStart until load.data.size)
+    }
+
+    @WorkerThread
+    suspend fun downloadWorkThread(
+        load: StreamResponse,
+        api: APIRepository,
+        range: ClosedRange<Int>
+    ) {
+        val filesDir = activity?.filesDir ?: return
         val sApiName = BookDownloader2Helper.sanitizeFilename(api.name)
         val sAuthor =
             BookDownloader2Helper.sanitizeFilename(load.author ?: "")
@@ -1726,9 +1947,15 @@ object BookDownloader2 {
         val id = generateId(load, api.name)
 
         val totalItems = range.endInclusive + 1
-        setPrefixData(load, api, totalItems)
+        val alreadyDownloaded =
+            (filesDir.listFiles()?.mapNotNull { it.nameWithoutExtension.toIntOrNull() }
+                ?.count { it < range.start } ?: 0).toLong()
+        //println("alreadyDownloaded:$alreadyDownloaded")
+        //println("totalItems:$totalItems")
+        setPrefixData(load, api.name, totalItems.toLong(), alreadyDownloaded)
 
-        var downloadedTotal = 0 // how many successful get requests
+        var downloadedTotal = 0L // how many successful get requests
+
         try {
             // 1. download the image
             downloadImage(load, sApiName, sAuthor, sName, filesDir)
@@ -1780,19 +2007,29 @@ object BookDownloader2 {
                 }
 
                 val beforeDownloadTime = System.currentTimeMillis()
+                val hasDownloadedChapter =
+                    BookDownloader2Helper.downloadIndividualChapter(filepath, api, data)
 
-                if (!BookDownloader2Helper.downloadIndividualChapter(filepath, api, data)) {
+                if (hasDownloadedChapter) {
+                    downloadedTotal += 1
+                } else {
                     currentState = DownloadState.IsFailed
                 }
 
-                downloadedTotal += 1
+                val processedItems = index - range.start +
+                        if (hasDownloadedChapter) {
+                            1
+                        } else {
+                            0
+                        }
 
                 val afterDownloadTime = System.currentTimeMillis()
                 timePerLoadMs =
                     (afterDownloadTime - beforeDownloadTime) * 0.05 + timePerLoadMs * 0.95 // rolling average
 
                 changeDownload(id) {
-                    this.progress = index + 1
+                    this.progress = index.toLong() + 1L
+                    this.downloaded = processedItems.toLong() + alreadyDownloaded
                     state = currentState
                     etaMs = (timePerLoadMs * (range.endInclusive - index)).toLong()
                 }?.let { progressState ->
@@ -1800,11 +2037,12 @@ object BookDownloader2 {
                 }
 
                 when (currentState) {
-                    DownloadState.IsStopped -> return@ioSafe
+                    DownloadState.IsStopped -> return
                     DownloadState.IsFailed -> {
                         // we are only interested in a notification if we failed
                         changeDownload(id) {
-                            this.progress = index + 1
+                            this.progress = index.toLong() + 1L
+                            this.downloaded = processedItems.toLong() + alreadyDownloaded
                             state = currentState
                         }?.let { newProgressState ->
                             createNotification(
@@ -1813,7 +2051,7 @@ object BookDownloader2 {
                                 newProgressState,
                             )
                         }
-                        return@ioSafe
+                        return
                     }
 
                     else -> {}
@@ -1822,11 +2060,12 @@ object BookDownloader2 {
 
             // finally call it before changeDownload
             if (downloadedTotal > 0) {
-                setSuffixData(load, api)
+                setSuffixData(load, api.name)
             }
 
             changeDownload(id) {
-                this.progress = totalItems
+                this.progress = totalItems.toLong()
+                this.downloaded = range.endInclusive + 1 - range.start + alreadyDownloaded
                 state = DownloadState.IsDone
             }?.let { progressState ->
                 // only notify done if we have actually done some work
@@ -1840,7 +2079,7 @@ object BookDownloader2 {
         } catch (t: Throwable) {
             // also set it here in case of exception
             if (downloadedTotal > 0) {
-                setSuffixData(load, api)
+                setSuffixData(load, api.name)
             }
 
             logError(t)

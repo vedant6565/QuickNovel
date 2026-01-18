@@ -60,9 +60,26 @@ class TTSSession(val context: Context, event: (TTSHelper.TTSActionType) -> Boole
     private var TTSStartSpeakId = 0
     private var TTSEndSpeakId = 0
 
+    private var speed: Float = 1.0f
+    private var pitch: Float = 1.0f
+
+    fun isValidTTS(): Boolean {
+        return tts != null
+    }
+
     private fun clearTTS(tts: TextToSpeech) {
         tts.stop()
         TTSQueue = null
+    }
+
+    fun setSpeed(speed: Float) {
+        this.speed = speed
+        tts?.setSpeechRate(speed)
+    }
+
+    fun setPitch(pitch: Float) {
+        this.pitch = pitch
+        tts?.setPitch(pitch)
     }
 
     fun setLanguage(locale: Locale?) {
@@ -215,6 +232,10 @@ class TTSSession(val context: Context, event: (TTSHelper.TTSActionType) -> Boole
                             }
                         }
                     })
+
+                    pendingTTS.setPitch(pitch)
+                    pendingTTS.setSpeechRate(speed)
+
                     tts = pendingTTS
                     tts?.let(callback)
                 }
@@ -327,7 +348,8 @@ abstract class SpanDisplay {
 data class ChapterStartSpanned(
     override val index: Int,
     override val innerIndex: Int,
-    val name: UiText
+    val name: UiText,
+    val canReload: Boolean,
 ) : SpanDisplay() {
     override fun id(): Long {
         return generateId(1, index, 0, 0)
@@ -343,7 +365,11 @@ data class LoadingSpanned(val url: String?, override val index: Int) : SpanDispl
     val text get() = url?.let { txt(R.string.loading_format, it) } ?: txt(R.string.loading)
 }
 
-data class FailedSpanned(val reason: UiText, override val index: Int, val canReload: Boolean) :
+data class FailedSpanned(
+    val reason: UiText,
+    override val index: Int,
+    val cause: Throwable?
+) :
     SpanDisplay() {
     override val innerIndex: Int = 0
     override fun id(): Long {
@@ -463,27 +489,31 @@ object TTSHelper {
         while (nextIndex != -1) {
             // don't include duplicate newlines
             if (currentOffset != nextIndex) {
-                spans.add(
-                    TextSpan(
-                        unsegmented.subSequence(currentOffset, nextIndex) as Spanned,
-                        currentOffset,
-                        nextIndex,
-                        index,
-                        innerIndex
+                // Do not include blank text
+                val text = unsegmented.subSequence(currentOffset, nextIndex) as Spanned
+                if (!text.isBlank()) {
+                    spans.add(
+                        TextSpan(
+                            text,
+                            currentOffset,
+                            nextIndex,
+                            index,
+                            innerIndex
+                        )
                     )
-                )
-                innerIndex++
+                    innerIndex++
+                }
             }
 
             currentOffset = nextIndex + 1
-
             nextIndex = unsegmented.indexOf('\n', currentOffset)
         }
 
-        if (currentOffset != unsegmented.length)
+        val text = unsegmented.subSequence(currentOffset, unsegmented.length) as Spanned
+        if (currentOffset != unsegmented.length && !text.isBlank())
             spans.add(
                 TextSpan(
-                    unsegmented.subSequence(currentOffset, unsegmented.length) as Spanned,
+                    text,
                     currentOffset,
                     unsegmented.length,
                     index,
@@ -513,12 +543,16 @@ object TTSHelper {
         return loc
     }
 
-    fun preParseHtml(text: String): String {
+    fun preParseHtml(text: String, authorNotes: Boolean): String {
         val document = Jsoup.parse(text)
 
         // REMOVE USELESS STUFF THAT WONT BE USED IN A NORMAL TXT
         document.select("style").remove()
         document.select("script").remove()
+
+        if (!authorNotes) {
+            document.select("div.qnauthornotecontainer").remove()
+        }
 
         return document.html()
             // this makes tables readable, more or less places a newline between rows
@@ -566,29 +600,32 @@ object TTSHelper {
     fun ttsParseText(text: String, tag: Int): ArrayList<TTSLine> {
         val cleanText = text
             .replace("\\.([A-z])".toRegex(), ",$1")//\.([A-z]) \.([^-\s])
-            .replace("([0-9])([.:])([0-9])".toRegex(), "$1,$3") // GOOD FOR DECIMALS
+            .replace("([.:])([0-9])".toRegex(), ",$2") // GOOD FOR DECIMALS
             .replace(
-                "([ \"“‘'])(Dr|Mr|Mrs)\\. ([A-Z])".toRegex(),
+                "(^|[ \"“‘'])(Dr|Mr|Mrs)\\. ([A-Z])".toRegex(),
                 "$1$2, $3"
             )
-        println("SIZE: ${text.length}")
+
+        //println("SIZE: ${text.length}")
+
         debugAssert({ cleanText.length != text.length }) {
             "TTS requires same length"
         }
 
         val ttsLines = ArrayList<TTSLine>()
 
+
+        val invalidStartChars =
+            arrayOf(
+                ' ', '.', ',', '\n', '\"',
+                '\'', '’', '‘', '“', '”', '«', '»', '「', '」', '…', '[', ']'
+            )
+        val endingCharacters = arrayOf(".", "\n", ";", "?", ":")
         var index = 0
         while (true) {
             if (index >= text.length) {
                 break
             }
-
-            val invalidStartChars =
-                arrayOf(
-                    ' ', '.', ',', '\n', '\"',
-                    '\'', '’', '‘', '“', '”', '«', '»', '「', '」', '…'
-                )
             while (invalidStartChars.contains(text[index])) {
                 index++
                 if (index >= text.length) {
@@ -597,7 +634,7 @@ object TTSHelper {
             }
 
             var endIndex = Int.MAX_VALUE
-            for (a in arrayOf(".", "\n", ";", "?", ":")) {
+            for (a in endingCharacters) {
                 val indexEnd = cleanText.indexOf(a, index)
 
                 if (indexEnd == -1) continue
@@ -634,7 +671,7 @@ object TTSHelper {
             try {
                 // THIS PART IF FOR THE SPEAK PART, REMOVING STUFF THAT IS WACK
                 val message = text.substring(index, endIndex)
-                var msg = message//Regex("\\p{L}").replace(message,"")
+                var msg = message
                 val invalidChars =
                     arrayOf(
                         "-",
@@ -650,15 +687,13 @@ object TTSHelper {
                         "–",
                         "¿",
                         "*",
-                        "~"
+                        "~",
+                        "\u200c" // Zero width joiner
                     ) // "\'", //Don't ect
                 for (c in invalidChars) {
                     msg = msg.replace(c, " ")
                 }
                 msg = msg.replace("...", " ")
-
-                /*.replace("…", ",")*/
-
                 if (msg
                         .replace("\n", "")
                         .replace("\t", "")
@@ -671,7 +706,10 @@ object TTSHelper {
             } catch (t: Throwable) {
                 break
             }
-            index = endIndex + 1
+            index = endIndex
+            if (text.getOrNull(index)?.isWhitespace() == true) {
+                index++
+            }
         }
 
         return ttsLines

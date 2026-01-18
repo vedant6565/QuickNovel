@@ -1,63 +1,169 @@
 package com.lagradost.quicknovel.ui.result
 
-import android.content.Context
 import android.content.DialogInterface
 import android.content.Intent
-import android.net.Uri
 import androidx.appcompat.app.AlertDialog
+import androidx.core.net.toUri
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lagradost.quicknovel.APIRepository
+import com.lagradost.quicknovel.BaseApplication.Companion.context
 import com.lagradost.quicknovel.BaseApplication.Companion.getKey
 import com.lagradost.quicknovel.BaseApplication.Companion.removeKey
 import com.lagradost.quicknovel.BaseApplication.Companion.setKey
 import com.lagradost.quicknovel.BookDownloader2
+import com.lagradost.quicknovel.BookDownloader2.downloadProgress
+import com.lagradost.quicknovel.BookDownloader2Helper
 import com.lagradost.quicknovel.BookDownloader2Helper.generateId
 import com.lagradost.quicknovel.ChapterData
 import com.lagradost.quicknovel.CommonActivity.activity
 import com.lagradost.quicknovel.DOWNLOAD_EPUB_LAST_ACCESS
-import com.lagradost.quicknovel.DataStore.getKey
 import com.lagradost.quicknovel.DownloadActionType
 import com.lagradost.quicknovel.DownloadProgressState
 import com.lagradost.quicknovel.DownloadState
 import com.lagradost.quicknovel.EPUB_CURRENT_POSITION
+import com.lagradost.quicknovel.EPUB_CURRENT_POSITION_CHAPTER
 import com.lagradost.quicknovel.EPUB_CURRENT_POSITION_READ_AT
-import com.lagradost.quicknovel.EPUB_CURRENT_POSITION_SCROLL
 import com.lagradost.quicknovel.EPUB_CURRENT_POSITION_SCROLL_CHAR
 import com.lagradost.quicknovel.HISTORY_FOLDER
 import com.lagradost.quicknovel.LoadResponse
+import com.lagradost.quicknovel.PreferenceDelegate
 import com.lagradost.quicknovel.R
 import com.lagradost.quicknovel.RESULT_BOOKMARK
 import com.lagradost.quicknovel.RESULT_BOOKMARK_STATE
-import com.lagradost.quicknovel.ReadActivity2
-import com.lagradost.quicknovel.ReadActivityViewModel
+import com.lagradost.quicknovel.RESULT_CHAPTER_FILTER_BOOKMARKED
+import com.lagradost.quicknovel.RESULT_CHAPTER_FILTER_DOWNLOADED
+import com.lagradost.quicknovel.RESULT_CHAPTER_FILTER_READ
+import com.lagradost.quicknovel.RESULT_CHAPTER_FILTER_UNREAD
+import com.lagradost.quicknovel.RESULT_CHAPTER_SORT
 import com.lagradost.quicknovel.StreamResponse
 import com.lagradost.quicknovel.UserReview
 import com.lagradost.quicknovel.mvvm.Resource
+import com.lagradost.quicknovel.mvvm.launchSafe
 import com.lagradost.quicknovel.ui.ReadType
+import com.lagradost.quicknovel.ui.download.CHAPTER_SORT
 import com.lagradost.quicknovel.ui.download.DownloadFragment
+import com.lagradost.quicknovel.ui.download.LAST_ACCES_SORT
+import com.lagradost.quicknovel.ui.download.LAST_UPDATED_SORT
+import com.lagradost.quicknovel.ui.download.REVERSE_CHAPTER_SORT
+import com.lagradost.quicknovel.ui.download.REVERSE_LAST_ACCES_SORT
+import com.lagradost.quicknovel.ui.download.REVERSE_LAST_UPDATED_SORT
+import com.lagradost.quicknovel.ui.download.SortingMethod
 import com.lagradost.quicknovel.util.Apis
 import com.lagradost.quicknovel.util.Coroutines.ioSafe
 import com.lagradost.quicknovel.util.ResultCached
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import androidx.core.net.toUri
+
 
 class ResultViewModel : ViewModel() {
+    companion object {
+        val chapterSortingMethods = arrayOf(
+            SortingMethod(R.string.chapter_sort, CHAPTER_SORT, REVERSE_CHAPTER_SORT),
+            SortingMethod(R.string.recently_sort, LAST_ACCES_SORT, REVERSE_LAST_ACCES_SORT),
+        )
+        var sortChapterBy by PreferenceDelegate(RESULT_CHAPTER_SORT, CHAPTER_SORT, Int::class)
+
+        var filterChapterByDownloads by PreferenceDelegate(
+            RESULT_CHAPTER_FILTER_DOWNLOADED,
+            false,
+            Boolean::class
+        )
+        var filterChapterByBookmarked by PreferenceDelegate(
+            RESULT_CHAPTER_FILTER_BOOKMARKED,
+            false,
+            Boolean::class
+        )
+        var filterChapterByRead by PreferenceDelegate(
+            RESULT_CHAPTER_FILTER_READ,
+            true,
+            Boolean::class
+        )
+        var filterChapterByUnread by PreferenceDelegate(
+            RESULT_CHAPTER_FILTER_UNREAD,
+            true,
+            Boolean::class
+        )
+
+    }
+
+    fun reorderChapters() {
+        when (val response = this.loadResponse.value) {
+            is Resource.Success -> {
+                reorderChapters(response.value)
+            }
+
+            else -> {}
+        }
+    }
+
+    fun reorderChapters(response: LoadResponse) {
+        when (response) {
+            is StreamResponse -> {
+                chapters.postValue(orderChapters(response.data))
+            }
+
+            else -> chapters.postValue(null)
+        }
+    }
+
+
+    private fun orderChapters(list: List<ChapterData>): List<ChapterData> {
+        val filterRead = filterChapterByRead
+        val filterUnread = filterChapterByUnread
+        // val filterBookmarked = filterChapterByBookmarked
+        val filterDownloaded = filterChapterByDownloads
+        val sort = sortChapterBy
+        val state = downloadState.value
+
+        return list.filter { chapter ->
+            val read = hasReadChapter(chapter)
+
+            (filterUnread && !read) || (filterRead && read) ||
+                    (filterDownloaded && (state != null && state.progress > (chapterIndex(chapter)
+                        ?: Int.MAX_VALUE)))
+        }.sortedBy { chapter ->
+            return@sortedBy when (sort) {
+                CHAPTER_SORT -> {
+                    chapterIndex(chapter)?.toLong()
+                }
+
+                REVERSE_CHAPTER_SORT -> {
+                    chapterIndex(chapter)?.toLong()?.unaryMinus()
+                }
+
+                LAST_ACCES_SORT -> {
+                    getChapterReadTime(chapter) ?: Long.MAX_VALUE
+                }
+
+                REVERSE_LAST_ACCES_SORT -> {
+                    -(getChapterReadTime(chapter) ?: Long.MAX_VALUE)
+                }
+
+                else -> null
+            }
+        }
+    }
+
     fun clear() {
         loadResponse.postValue(null)
+        chapters.postValue(null)
     }
 
     fun hasReadChapter(chapter: ChapterData): Boolean {
+        return getChapterReadTime(chapter) != null
+    }
+
+    fun getChapterReadTime(chapter: ChapterData): Long? {
         val streamResponse =
-            (load as? StreamResponse) ?: return false
-        val index = chapterIndex(chapter) ?: return false
+            (load as? StreamResponse) ?: return null
+        val index = chapterIndex(chapter) ?: return null
         return getKey<Long>(
             EPUB_CURRENT_POSITION_READ_AT,
             "${streamResponse.name}/$index"
-        ) != null
+        )
     }
 
     fun setReadChapter(chapter: ChapterData, value: Boolean): Boolean {
@@ -81,15 +187,14 @@ class ResultViewModel : ViewModel() {
         return true
     }
 
-    lateinit var repo: APIRepository
+    var repo: APIRepository? = null
 
     var isGetLoaded = false
 
     var id: MutableLiveData<Int> = MutableLiveData<Int>(-1)
     var readState: MutableLiveData<ReadType> = MutableLiveData<ReadType>(ReadType.NONE)
 
-    val api get() = repo
-    val apiName get() = api.name
+    var apiName : String = ""
 
     val currentTabIndex: MutableLiveData<Int> by lazy {
         MutableLiveData<Int>(0)
@@ -108,6 +213,8 @@ class ResultViewModel : ViewModel() {
     val loadResponse: MutableLiveData<Resource<LoadResponse>?> =
         MutableLiveData<Resource<LoadResponse>?>()
 
+    val chapters: MutableLiveData<List<ChapterData>?> =
+        MutableLiveData<List<ChapterData>?>()
 
     val reviews: MutableLiveData<Resource<ArrayList<UserReview>>> by lazy {
         MutableLiveData<Resource<ArrayList<UserReview>>>()
@@ -122,12 +229,13 @@ class ResultViewModel : ViewModel() {
     private fun loadMoreReviews(url: String) {
         viewModelScope.launch {
             if (loadMoreReviewsMutex.isLocked) return@launch
+            val api = repo ?: return@launch
             loadMoreReviewsMutex.withLock {
                 val loadPage = (reviewPage.value ?: 0) + 1
                 if (loadPage == 1) {
                     reviews.postValue(Resource.Loading())
                 }
-                when (val data = repo.loadReviews(url, loadPage, false)) {
+                when (val data = api.loadReviews(url, loadPage, false)) {
                     is Resource.Success -> {
                         val moreReviews = data.value
                         currentReviews.addAll(moreReviews)
@@ -142,9 +250,9 @@ class ResultViewModel : ViewModel() {
         }
     }
 
-    fun openInBrowser() = viewModelScope.launch {
+    fun openInBrowser() = viewModelScope.launchSafe {
         loadMutex.withLock {
-            if (loadUrl.isBlank()) return@launch
+            if (loadUrl.isBlank()) return@launchSafe
             val i = Intent(Intent.ACTION_VIEW)
             i.data = loadUrl.toUri()
             activity?.startActivity(i)
@@ -158,15 +266,21 @@ class ResultViewModel : ViewModel() {
         if (newPos == 1 && currentReviews.isEmpty()) {
             loadMoreReviews(verify = false)
         }
+        if (newPos == 3) {
+            reorderChapters()
+        } else {
+            // clears the chapters to avoid flicker
+            chapters.postValue(null)
+        }
     }
 
-    fun readEpub() = viewModelScope.launch {
+    fun readEpub() = viewModelScope.launchSafe {
         loadMutex.withLock {
-            if (!hasLoaded) return@launch
+            if (!hasLoaded) return@launchSafe
             addToHistory()
             BookDownloader2.readEpub(
                 loadId,
-                downloadState.value?.progress ?: return@launch,
+                downloadState.value?.progress?.toInt() ?: return@launchSafe,
                 load.author,
                 load.name,
                 apiName,
@@ -209,6 +323,11 @@ class ResultViewModel : ViewModel() {
                     setReadChapter(chapter, true)
                     setKey(EPUB_CURRENT_POSITION, streamResponse.name, index)
                     setKey(
+                        EPUB_CURRENT_POSITION_CHAPTER,
+                        streamResponse.name,
+                        streamResponse.data[index].name
+                    )
+                    setKey(
                         EPUB_CURRENT_POSITION_SCROLL_CHAR, streamResponse.name, 0,
                     )
                 }
@@ -223,12 +342,12 @@ class ResultViewModel : ViewModel() {
      *  done / pending => nothing,
      *  else => download
      * */
-    fun downloadOrPause() = viewModelScope.launch {
+    fun downloadOrPause() = viewModelScope.launchSafe {
         loadMutex.withLock {
-            if (!hasLoaded) return@launch
+            if (!hasLoaded) return@launchSafe
 
             BookDownloader2.downloadInfoMutex.withLock {
-                BookDownloader2.downloadProgress[loadId]?.let { downloadState ->
+                downloadProgress[loadId]?.let { downloadState ->
                     when (downloadState.state) {
                         DownloadState.IsPaused -> BookDownloader2.addPendingAction(
                             loadId,
@@ -244,21 +363,116 @@ class ResultViewModel : ViewModel() {
 
                         }
 
-                        else -> BookDownloader2.download(load, api)
+                        else -> BookDownloader2.download(load, context ?: return@launchSafe)
                     }
                 } ?: run {
-                    BookDownloader2.download(load, api)
+                    BookDownloader2.download(load, context ?: return@launchSafe)
+                }
+            }
+        }
+    }
+
+    fun pause() = viewModelScope.launchSafe {
+        loadMutex.withLock {
+            if (!hasLoaded) return@launchSafe
+
+            BookDownloader2.downloadInfoMutex.withLock {
+                downloadProgress[loadId]?.let { downloadState ->
+                    when (downloadState.state) {
+                        DownloadState.IsDownloading -> BookDownloader2.addPendingAction(
+                            loadId,
+                            DownloadActionType.Pause
+                        )
+
+                        else -> {
+
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun stop() = viewModelScope.launchSafe {
+        loadMutex.withLock {
+            if (!hasLoaded) return@launchSafe
+
+            BookDownloader2.downloadInfoMutex.withLock {
+                downloadProgress[loadId]?.let { downloadState ->
+                    when (downloadState.state) {
+                        DownloadState.Nothing, DownloadState.IsDone, DownloadState.IsStopped, DownloadState.IsFailed -> {
+
+                        }
+
+                        else -> {
+                            BookDownloader2.addPendingAction(
+                                loadId,
+                                DownloadActionType.Stop
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun downloadFrom(start: Int?) = viewModelScope.launchSafe {
+        loadMutex.withLock {
+            if (!hasLoaded) return@launchSafe
+            val api = repo ?: return@launchSafe
+            BookDownloader2.downloadInfoMutex.withLock {
+                BookDownloader2.changeDownloadStart(load, api, start)
+                downloadProgress[loadId]?.let { downloadState ->
+                    when (downloadState.state) {
+                        DownloadState.IsPaused -> BookDownloader2.addPendingAction(
+                            loadId,
+                            DownloadActionType.Resume
+                        )
+
+                        DownloadState.IsPending -> {
+
+                        }
+
+                        // DownloadState.IsDone
+                        else -> BookDownloader2.download(load, context ?: return@launchSafe)
+                    }
+                } ?: run {
+                    BookDownloader2.download(load, context ?: return@launchSafe)
+                }
+            }
+        }
+    }
+
+    fun download() = viewModelScope.launchSafe {
+        loadMutex.withLock {
+            if (!hasLoaded) return@launchSafe
+            BookDownloader2.downloadInfoMutex.withLock {
+                downloadProgress[loadId]?.let { downloadState ->
+                    when (downloadState.state) {
+                        DownloadState.IsPaused -> BookDownloader2.addPendingAction(
+                            loadId,
+                            DownloadActionType.Resume
+                        )
+
+                        DownloadState.IsDone, DownloadState.IsPending -> {
+
+                        }
+
+                        else -> BookDownloader2.download(load, context ?: return@launchSafe)
+                    }
+                } ?: run {
+                    BookDownloader2.download(load, context ?: return@launchSafe)
                 }
             }
         }
     }
 
 
-    private fun addToHistory() = viewModelScope.launch {
+    private fun addToHistory() = viewModelScope.launchSafe {
         // we wont add it to history from cache
-        if (!isGetLoaded) return@launch
+        if (!isGetLoaded) return@launchSafe
         loadMutex.withLock {
-            if (!hasLoaded) return@launch
+            if (!hasLoaded) return@launchSafe
             setKey(
                 HISTORY_FOLDER, loadId.toString(), ResultCached(
                     loadUrl,
@@ -277,8 +491,8 @@ class ResultViewModel : ViewModel() {
         }
     }
 
-    // requireContext().setKey(DOWNLOAD_TOTAL, localId.toString(), res.data .size)
-    // loadReviews()
+// requireContext().setKey(DOWNLOAD_TOTAL, localId.toString(), res.data .size)
+// loadReviews()
 
     fun isInReviews(): Boolean {
         return currentTabIndex.value == 1
@@ -385,13 +599,19 @@ class ResultViewModel : ViewModel() {
     val downloadState: MutableLiveData<DownloadProgressState> by lazy {
         MutableLiveData<DownloadProgressState>(null)
     }
+    private var downloadStateValue: DownloadProgressState? = null
+
+    fun setDownloadState(state: DownloadProgressState) {
+        downloadStateValue = state
+        downloadState.postValue(state)
+    }
 
     private fun progressChanged(data: Pair<Int, DownloadProgressState>) =
         viewModelScope.launch {
             val (id, state) = data
             loadMutex.withLock {
                 if (!hasLoaded || id != loadId) return@launch
-                downloadState.postValue(state)
+                setDownloadState(state)
             }
         }
 
@@ -416,19 +636,37 @@ class ResultViewModel : ViewModel() {
             if (!hasLoaded) return@launch
 
             BookDownloader2.downloadInfoMutex.withLock {
-                val current = BookDownloader2.downloadProgress[loadId]
-                if (current == null) {
-                    val new = DownloadProgressState(
-                        DownloadState.Nothing,
-                        0,
-                        (load as? StreamResponse)?.data?.size ?: 1,
-                        System.currentTimeMillis(),
-                        null
-                    )
-                    //BookDownloader2.downloadProgress[loadId] = new
-                    downloadState.postValue(new)
+                val current = downloadProgress[loadId]
+                if (current != null) {
+                    setDownloadState(current)
                 } else {
-                    downloadState.postValue(current)
+                    BookDownloader2Helper.downloadInfo(
+                        context,
+                        load.author,
+                        load.name,
+                        load.apiName
+                    )?.let { info ->
+                        val new = DownloadProgressState(
+                            state = DownloadState.Nothing,
+                            progress = info.progress,
+                            total = info.total,
+                            downloaded = info.downloaded,
+                            lastUpdatedMs = System.currentTimeMillis(),
+                            etaMs = null
+                        )
+                        downloadProgress[loadId] = new
+                        setDownloadState(new)
+                    } ?: run {
+                        val new = DownloadProgressState(
+                            state = DownloadState.Nothing,
+                            progress = 0,
+                            total = (load as? StreamResponse)?.data?.size?.toLong() ?: 1,
+                            downloaded = 0,
+                            lastUpdatedMs = System.currentTimeMillis(),
+                            etaMs = null
+                        )
+                        setDownloadState(new)
+                    }
                 }
             }
         }
@@ -437,7 +675,8 @@ class ResultViewModel : ViewModel() {
     fun initState(card: ResultCached) = viewModelScope.launch {
         isGetLoaded = false
         loadMutex.withLock {
-            repo = Apis.getApiFromName(card.apiName)
+            this@ResultViewModel.apiName = card.apiName
+            repo = Apis.getApiFromNameOrNull(card.apiName)
             loadUrl = card.source
 
             val data = StreamResponse(
@@ -454,7 +693,6 @@ class ResultViewModel : ViewModel() {
 
             load = data
             loadResponse.postValue(Resource.Success(data))
-
             setState(card.id)
         }
     }
@@ -487,6 +725,7 @@ class ResultViewModel : ViewModel() {
         loadResponse.postValue(Resource.Loading(card.source))
 
         loadMutex.withLock {
+            this@ResultViewModel.apiName = card.apiName
             repo = Apis.getApiFromName(card.apiName)
             loadUrl = card.source
 
@@ -503,7 +742,6 @@ class ResultViewModel : ViewModel() {
             )
             load = data
             loadResponse.postValue(Resource.Success(data))
-
             setState(card.id)
         }
     }
@@ -513,11 +751,12 @@ class ResultViewModel : ViewModel() {
         loadResponse.postValue(Resource.Loading(url))
 
         loadMutex.withLock {
-            repo = Apis.getApiFromName(apiName)
+            this@ResultViewModel.apiName = apiName
+            repo = Apis.getApiFromNameOrNull(apiName)
             loadUrl = url
         }
 
-        val data = repo.load(url)
+        val data = repo?.load(url)
         loadMutex.withLock {
             when (data) {
                 is Resource.Success -> {

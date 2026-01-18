@@ -9,6 +9,7 @@ import com.lagradost.quicknovel.APIRepository
 import com.lagradost.quicknovel.CommonActivity.activity
 import com.lagradost.quicknovel.SearchResponse
 import com.lagradost.quicknovel.mvvm.Resource
+import com.lagradost.quicknovel.mvvm.map
 import com.lagradost.quicknovel.util.Apis
 import kotlinx.coroutines.launch
 
@@ -22,10 +23,17 @@ class MainPageViewModel : ViewModel() {
     }*/
 
     private val infCards: ArrayList<SearchResponse> = arrayListOf()
-    var oldResponse : Resource<List<SearchResponse>>? = null
+    private var oldResponse: Resource<SearchResponseList>? = null
+    private var searchResponseListQueries : Int = 0
 
-    val currentCards: MutableLiveData<Resource<List<SearchResponse>>> by lazy {
-        MutableLiveData<Resource<List<SearchResponse>>>()
+    data class SearchResponseList(
+        val items: List<SearchResponse>,
+        val pages: Int,
+        val id : Int,
+    )
+
+    val currentCards: MutableLiveData<Resource<SearchResponseList>> by lazy {
+        MutableLiveData<Resource<SearchResponseList>>()
     }
 
     private val currentPage: MutableLiveData<Int> by lazy {
@@ -68,7 +76,7 @@ class MainPageViewModel : ViewModel() {
     }
 
     fun search(query: String) {
-        if(isInSearch.value == false) {
+        if (isInSearch.value == false) {
             oldResponse = currentCards.value
         }
 
@@ -78,14 +86,23 @@ class MainPageViewModel : ViewModel() {
         isInSearch.postValue(true)
         viewModelScope.launch {
             val res = repo.search(query)
-            currentCards.postValue(res)
+            currentCards.postValue(res.map { x -> SearchResponseList(items = x, pages = 1, id = ++searchResponseListQueries) })
         }
     }
 
     fun switchToMain() {
         if (isInSearch.value == false) return
 
-        currentCards.postValue(oldResponse ?: Resource.Success(infCards))
+        currentCards.postValue(
+            oldResponse ?: Resource.Success(
+                // this still gives a bug, works works 90% of the time so idc
+                SearchResponseList(
+                    infCards,
+                    ((currentPage.value ?: 0) + 1) + 1,
+                    ++searchResponseListQueries,
+                )
+            )
+        )
         oldResponse = null
         isInSearch.postValue(false)
     }
@@ -119,7 +136,7 @@ class MainPageViewModel : ViewModel() {
         }
 
         isInSearch.postValue(false)
-        if(page != 0) {
+        if (page != 0) {
             loadingMoreItems.postValue(true)
         }
         viewModelScope.launch {
@@ -130,14 +147,20 @@ class MainPageViewModel : ViewModel() {
                     currentUrl.postValue(response.url)
                     infCards.addAll(response.list)
 
-                    currentCards.postValue(Resource.Success(infCards))
+                    currentCards.postValue(
+                        Resource.Success(
+                            SearchResponseList(
+                                infCards,
+                                cPage + 1,
+                                ++searchResponseListQueries
+                            )
+                        )
+                    )
                 }
 
                 is Resource.Failure -> {
-                    val result: Resource<List<SearchResponse>> = Resource.Failure(
-                        res.isNetworkError,
-                        res.errorCode,
-                        res.errorResponse,
+                    val result: Resource<SearchResponseList> = Resource.Failure(
+                        res.cause,
                         res.errorString
                     )
                     currentCards.postValue(result)
@@ -147,6 +170,7 @@ class MainPageViewModel : ViewModel() {
                     //NOTHING
                 }
             }
+
             loadingMoreItems.postValue(false)
 
             currentPage.postValue(cPage)

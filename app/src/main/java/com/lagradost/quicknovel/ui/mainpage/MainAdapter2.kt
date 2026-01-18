@@ -5,13 +5,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.core.view.isVisible
-import androidx.fragment.app.Fragment
 import com.lagradost.quicknovel.MainActivity
 import com.lagradost.quicknovel.MainActivity.Companion.loadResult
 import com.lagradost.quicknovel.SearchResponse
 import com.lagradost.quicknovel.databinding.LoadingBottomBinding
 import com.lagradost.quicknovel.databinding.SearchResultGridBinding
-import com.lagradost.quicknovel.ui.BaseAdapter
+import com.lagradost.quicknovel.ui.NoStateAdapter
 import com.lagradost.quicknovel.ui.ViewHolderState
 import com.lagradost.quicknovel.util.UIHelper.setImage
 import com.lagradost.quicknovel.util.toPx
@@ -19,12 +18,10 @@ import com.lagradost.quicknovel.widget.AutofitRecyclerView
 import kotlin.math.roundToInt
 
 class MainAdapter2(
-    private val resView: AutofitRecyclerView, fragment: Fragment,
-    override val footers: Int
-) :
-    BaseAdapter<SearchResponse, Nothing>(fragment, 0) {
-
-    override fun onBindFooter(holder: ViewHolderState<Nothing>) {
+    private val resView: AutofitRecyclerView,
+    override var footers: Int
+) : NoStateAdapter<SearchResponse>() {
+    override fun onBindFooter(holder: ViewHolderState<Any>) {
         (holder.view as LoadingBottomBinding).apply {
             val coverHeight: Int =
                 (resView.itemWidth / 0.68).roundToInt()
@@ -44,7 +41,7 @@ class MainAdapter2(
         holder.view.root.isVisible = loadingItems
     }
 
-    override fun onCreateContent(parent: ViewGroup): ViewHolderState<Nothing> {
+    override fun onCreateContent(parent: ViewGroup): ViewHolderState<Any> {
         return ViewHolderState(
             SearchResultGridBinding.inflate(
                 LayoutInflater.from(
@@ -54,7 +51,7 @@ class MainAdapter2(
         )
     }
 
-    override fun onCreateFooter(parent: ViewGroup): ViewHolderState<Nothing> {
+    override fun onCreateFooter(parent: ViewGroup): ViewHolderState<Any> {
         return ViewHolderState(
             LoadingBottomBinding.inflate(
                 LayoutInflater.from(
@@ -65,7 +62,7 @@ class MainAdapter2(
     }
 
     override fun onBindContent(
-        holder: ViewHolderState<Nothing>,
+        holder: ViewHolderState<Any>,
         item: SearchResponse,
         position: Int
     ) {

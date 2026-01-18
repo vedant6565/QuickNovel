@@ -18,6 +18,8 @@ import com.lagradost.quicknovel.newSearchResponse
 import com.lagradost.quicknovel.newStreamResponse
 import com.lagradost.quicknovel.setStatus
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.util.Date
 
 class RoyalRoadProvider : MainAPI() {
@@ -46,7 +48,7 @@ class RoyalRoadProvider : MainAPI() {
         "All" to ""
     ) + (listOf(
         "Wuxia" to "wuxia",
-        "Xianxia" to "xianxia",
+        //"Xianxia" to "xianxia",
         "War and Military" to "war_and_military",
         "Low Fantasy" to "low_fantasy",
         "High Fantasy" to "high_fantasy",
@@ -105,8 +107,8 @@ class RoyalRoadProvider : MainAPI() {
         val document = app.get(realUrl).document
         val reviews = document.select("div.reviews-container > div.review")
         return reviews.mapNotNull { r ->
-            val textContent = r?.selectFirst("> div.review-right-content")
-            val scoreContent = r?.selectFirst("> div.review-side")
+            val textContent = r.selectFirst("> div.review-right-content")
+            val scoreContent = r.selectFirst("> div.review-side")
             fun parseScore(data: String?): Int? {
                 return (data?.replace("stars", "")
                     ?.toFloatOrNull()?.times(200))?.toInt()
@@ -179,7 +181,7 @@ class RoyalRoadProvider : MainAPI() {
             val scoresData =
                 if ((scores?.size
                         ?: 0) <= 0
-                ) ArrayList<Pair<Int, String>>() else scores?.mapNotNull { s ->
+                ) ArrayList() else scores?.mapNotNull { s ->
                     val divs = s.select("> div")
                     Pair(
                         parseScore(divs[1].attr("aria-label")) ?: return@mapNotNull null,
@@ -205,7 +207,7 @@ class RoyalRoadProvider : MainAPI() {
 
             val reviewContent = textContent?.selectFirst("> div.review-content")
             if (!showSpoilers) reviewContent?.removeClass("spoiler")
-            val reviewTxt = reviewContent?.text()
+            val reviewTxt = reviewContent?.html()
 
             UserReview(
                 reviewTxt ?: return@mapNotNull null,
@@ -261,7 +263,7 @@ class RoyalRoadProvider : MainAPI() {
     ): HeadMainPageResponse {
         val url =
             "$mainUrl/fictions/$orderBy?page=$page${if (tag == null || tag == "") "" else "&genre=$tag"}"
-        if (page > 1 && orderBy == "trending") return HeadMainPageResponse(
+        if (page > 1 && arrayOf("trending","rising-stars").contains(orderBy)) return HeadMainPageResponse(
             url,
             ArrayList()
         ) // TRENDING ONLY HAS 1 PAGE
@@ -271,7 +273,7 @@ class RoyalRoadProvider : MainAPI() {
         val document = Jsoup.parse(response.text)
 
         val returnValue = document.select("div.fiction-list-item").mapNotNull { h ->
-            val head = h?.selectFirst("> div")
+            val head = h.selectFirst("> div")
             val hInfo = head?.selectFirst("> h2.fiction-title > a")
 
             val name = hInfo?.text() ?: return@mapNotNull null
@@ -302,7 +304,7 @@ class RoyalRoadProvider : MainAPI() {
         val document = app.get("$mainUrl/fictions/search?title=$query").document
 
         return document.select("div.fiction-list-item").mapNotNull { h ->
-            val head = h?.selectFirst("> div.search-content")
+            val head = h.selectFirst("> div.search-content")
             val hInfo = head?.selectFirst("> h2.fiction-title > a")
 
             val name = hInfo?.text() ?: return@mapNotNull null
@@ -356,7 +358,7 @@ class RoyalRoadProvider : MainAPI() {
 
             val synoDescript = document.select("div.description > div")
             val synoParts = synoDescript.select("> p")
-            synopsis = if (synoParts.size == 0 && synoDescript.hasText()) {
+            synopsis = if (synoParts.isEmpty() && synoDescript.hasText()) {
                 synoDescript.text().replace("\n", "\n\n") // JUST IN CASE
             } else {
                 synoParts.joinToString(separator = "\n\n") { it.text() }
@@ -371,21 +373,77 @@ class RoyalRoadProvider : MainAPI() {
         }
     }
 
+    private fun addAuthorNotes(chapter: Element, document: Document) {
+        val noteContainerClass = "qnauthornotecontainer"
+        val noteContentClass = "qnauthornote"
+        val noteSeparatorClass = "qnauthornoteseparator"
+        val separatorLine = "━━━━━━━━━━━━━━━━━━━━"
+        val spacer = "&nbsp;"
+
+        val noteBeforeChapter = StringBuilder()
+        val noteAfterChapter = StringBuilder()
+
+        document.select("div.author-note").forEach { authorNote ->
+            val noteContainer = authorNote.parent() ?: return@forEach
+            val noteParent = noteContainer.parent() ?: return@forEach
+            val chapterParent = chapter.parent() ?: return@forEach
+
+            if (noteParent == chapterParent) {
+                val isNoteBeforeChapter = noteContainer.elementSiblingIndex() < chapter.elementSiblingIndex()
+                val noteContent = authorNote.html().takeIf { it.isNotBlank() } ?: return@forEach
+
+                if (isNoteBeforeChapter) {
+                    noteBeforeChapter.append(noteContent)
+                } else {
+                    noteAfterChapter.append(noteContent)
+                }
+            }
+        }
+
+        if (noteBeforeChapter.isNotEmpty()) {
+            val content = """
+                <div class="$noteContainerClass">
+                    <div class="$noteContentClass">$noteBeforeChapter</div>
+                    <div class="$noteSeparatorClass"><p>$separatorLine</p><p>$spacer</p></div>
+                </div>
+                """.trimIndent()
+                
+            Jsoup.parse(content).selectFirst("div")?.let {
+                chapter.prependChild(it)
+            }
+        }
+        
+        if (noteAfterChapter.isNotEmpty()) {
+            val content = """
+                <div class="$noteContainerClass">
+                    <div class="$noteSeparatorClass"><p>$spacer</p><p>$separatorLine</p></div>
+                    <div class="$noteContentClass">$noteAfterChapter</div>
+                </div>
+                """.trimIndent()
+                
+            Jsoup.parse(content).selectFirst("div")?.let {
+                chapter.appendChild(it)
+            }
+        }
+    }
+
     override suspend fun loadHtml(url: String): String? {
         val response = app.get(url)
         val document = Jsoup.parse(response.text)
         val styles = document.select("style")
         val hiddenRegex = Regex("^\\s*(\\..*)\\s*\\{", RegexOption.MULTILINE)
-        val chap = document.selectFirst("div.chapter-content")
+        val chap = document.selectFirst("div.chapter-content") ?: return null
+        addAuthorNotes(chap, document)
+
         styles.forEach { style ->
             hiddenRegex.findAll(style.toString()).forEach {
                 val className = it.groupValues[1]
                 if (className.isNotEmpty()) {
-                    chap?.select(className)?.remove()
+                    chap.select(className).remove()
                 }
             }
         }
 
-        return chap?.html()
+        return chap.html()
     }
 }

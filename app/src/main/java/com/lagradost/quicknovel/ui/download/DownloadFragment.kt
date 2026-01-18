@@ -1,41 +1,52 @@
 package com.lagradost.quicknovel.ui.download
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.view.LayoutInflater
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.AbsListView.CHOICE_MODE_SINGLE
-import android.widget.ArrayAdapter
 import android.widget.ImageView
-import android.widget.ListView
-import androidx.annotation.StringRes
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.SearchView
-import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
-import androidx.fragment.app.viewModels
+import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
-import com.lagradost.quicknovel.*
 import com.lagradost.quicknovel.BaseApplication.Companion.getKey
 import com.lagradost.quicknovel.BaseApplication.Companion.setKey
+import com.lagradost.quicknovel.BookDownloader2
+import com.lagradost.quicknovel.BookDownloader2Helper
+import com.lagradost.quicknovel.BookDownloader2Helper.IMPORT_SOURCE
+import com.lagradost.quicknovel.CommonActivity.activity
+import com.lagradost.quicknovel.DOWNLOAD_NORMAL_SORTING_METHOD
+import com.lagradost.quicknovel.DOWNLOAD_SETTINGS
+import com.lagradost.quicknovel.DOWNLOAD_SORTING_METHOD
+import com.lagradost.quicknovel.DownloadState
+import com.lagradost.quicknovel.R
 import com.lagradost.quicknovel.databinding.FragmentDownloadsBinding
+import com.lagradost.quicknovel.databinding.SortBottomSheetBinding
+import com.lagradost.quicknovel.mvvm.logError
 import com.lagradost.quicknovel.mvvm.observe
-import com.lagradost.quicknovel.ui.ReadType
+import com.lagradost.quicknovel.mvvm.safe
+import com.lagradost.quicknovel.ui.SortingMethodAdapter
+import com.lagradost.quicknovel.ui.UiImage
 import com.lagradost.quicknovel.ui.img
-import com.lagradost.quicknovel.util.SettingsHelper.getDownloadIsCompact
 import com.lagradost.quicknovel.util.UIHelper.colorFromAttribute
 import com.lagradost.quicknovel.util.UIHelper.fixPaddingStatusbar
-import com.lagradost.quicknovel.util.toPx
+import com.lagradost.safefile.MimeTypes
+import com.lagradost.safefile.SafeFile
+import kotlinx.coroutines.launch
+import java.io.File
 
 class DownloadFragment : Fragment() {
-    private val viewModel: DownloadViewModel by viewModels()
+    private lateinit var viewModel: DownloadViewModel
     lateinit var binding: FragmentDownloadsBinding
 
     data class DownloadData(
@@ -80,8 +91,8 @@ class DownloadFragment : Fragment() {
         val synopsis: String?,
         val tags: List<String>?,
         val apiName: String,
-        val downloadedCount: Int,
-        val downloadedTotal: Int,
+        val downloadedCount: Long,
+        val downloadedTotal: Long,
         val ETA: String,
         val state: DownloadState,
         val id: Int,
@@ -89,42 +100,35 @@ class DownloadFragment : Fragment() {
         val lastUpdated: Long?,
         val lastDownloaded: Long?,
     ) {
-        val image get() = img(posterUrl)
+        val image by lazy {
+            if(isImported) {
+                val bitmap = BookDownloader2Helper.getCachedBitmap(activity, apiName, author, name)
+                if(bitmap != null) {
+                    return@lazy UiImage.Bitmap(bitmap)
+                }
+            }
+            img(posterUrl)
+        }
+
         override fun hashCode(): Int {
             return id
         }
+
+        val isImported: Boolean get() = apiName == IMPORT_SOURCE
     }
-
-    data class SortingMethod(@StringRes val name: Int, val id: Int, val inverse: Int = id)
-
-    private val sortingMethods = arrayOf(
-        SortingMethod(R.string.default_sort, DEFAULT_SORT),
-        SortingMethod(R.string.recently_sort, LAST_ACCES_SORT, REVERSE_LAST_ACCES_SORT),
-        SortingMethod(R.string.recently_updated_sort, LAST_UPDATED_SORT, REVERSE_LAST_UPDATED_SORT),
-        SortingMethod(R.string.alpha_sort, ALPHA_SORT, REVERSE_ALPHA_SORT),
-        SortingMethod(R.string.download_sort, DOWNLOADSIZE_SORT, REVERSE_DOWNLOADSIZE_SORT),
-        SortingMethod(
-            R.string.download_perc, DOWNLOADPRECENTAGE_SORT,
-            REVERSE_DOWNLOADPRECENTAGE_SORT
-        ),
-    )
-
-    private val normalSortingMethods = arrayOf(
-        SortingMethod(R.string.default_sort, DEFAULT_SORT),
-        SortingMethod(R.string.recently_sort, LAST_ACCES_SORT, REVERSE_LAST_ACCES_SORT),
-        SortingMethod(R.string.alpha_sort, ALPHA_SORT, REVERSE_ALPHA_SORT),
-    )
 
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?,
     ): View {
+        viewModel = ViewModelProvider(activity ?: this)[DownloadViewModel::class.java]
         binding = FragmentDownloadsBinding.inflate(inflater)
         return binding.root
         //return inflater.inflate(R.layout.fragment_downloads, container, false)
     }
 
+    @SuppressLint("NotifyDataSetChanged")
     private fun setupGridView() {
         (binding.viewpager.adapter as? ViewpagerAdapter)?.notifyDataSetChanged()
         /*val compactView = requireContext().getDownloadIsCompact()
@@ -163,10 +167,11 @@ class DownloadFragment : Fragment() {
     lateinit var searchExitIcon: ImageView
     lateinit var searchMagIcon: ImageView
 
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        viewModel.loadAllData()
+        viewModel.loadAllData(true)
         // activity?.fixPaddingStatusbar(binding.downloadToolbar)
         activity?.fixPaddingStatusbar(binding.downloadRoot)
         //viewModel = ViewModelProviders.of(activity!!).get(DownloadViewModel::class.java)
@@ -234,57 +239,26 @@ class DownloadFragment : Fragment() {
             })
         }
 
-        binding.downloadFab.setOnClickListener {
-            val bottomSheetDialog = BottomSheetDialog(requireContext())
-            bottomSheetDialog.setContentView(R.layout.sort_bottom_sheet)
-            val res = bottomSheetDialog.findViewById<ListView>(R.id.sort_click)!!
+        binding.downloadFab.setOnClickListener { view ->
+            val binding = SortBottomSheetBinding.inflate(layoutInflater, null, false)
+            val bottomSheetDialog = BottomSheetDialog(view.context)
+            bottomSheetDialog.setContentView(binding.root)
 
             val (sorting, key) = if (isOnDownloads) {
-                sortingMethods to DOWNLOAD_SORTING_METHOD
+                DownloadViewModel.sortingMethods to DOWNLOAD_SORTING_METHOD
             } else {
-                normalSortingMethods to DOWNLOAD_NORMAL_SORTING_METHOD
+                DownloadViewModel.normalSortingMethods to DOWNLOAD_NORMAL_SORTING_METHOD
             }
             val current = (getKey<Int>(DOWNLOAD_SETTINGS, key) ?: DEFAULT_SORT)
-            val index = sorting.indexOfFirst { t -> t.id == current || t.inverse == current }
 
-            val layout = when (sorting.getOrNull(index)?.let { item ->
-                if (item.id == item.inverse) {
-                    null
-                } else {
-                    item.id == current
-                }
-            }) {
-                true -> R.layout.sort_bottom_single_choice_down
-                false -> R.layout.sort_bottom_single_choice_up
-                null -> R.layout.sort_bottom_single_choice
-            }
-
-            val arrayAdapter = ArrayAdapter<String>(
-                binding.downloadFab.context,
-                layout
-            ) // checkmark_select_dialog
-            res.choiceMode = CHOICE_MODE_SINGLE
-
-            arrayAdapter.addAll(ArrayList(sorting.map { t -> getString(t.name) }))
-            res.adapter = arrayAdapter
-            res.setItemChecked(
-                index,
-                true
-            )
-
-            res.setOnItemClickListener { _, _, position, _ ->
-                val selected = sorting[position]
-                val sel =
-                    if (current == selected.id) {
-                        selected.inverse
-                    } else {
-                        selected.id
-                    }
-                setKey(DOWNLOAD_SETTINGS, key, sel)
+            val adapter = SortingMethodAdapter(current) { item, position, newId ->
+                setKey(DOWNLOAD_SETTINGS, key, newId)
                 viewModel.resortAllData()
                 bottomSheetDialog.dismiss()
+            }.apply {
+                submitList(sorting.toList())
             }
-
+            binding.sortClick.adapter = adapter
             bottomSheetDialog.show()
         }
         /*

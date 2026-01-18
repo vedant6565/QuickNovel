@@ -16,11 +16,13 @@
     <string name="no_data">No Data</string>
     <string name="no_author">Author not found</string>
     <string name="no_chapters">No Chapters</string>
+    <string name="error_outside_chapter">Invalid skip</string>
     <string name="generate_epub">Generate Epub</string>
     <string name="generating_epub">Generating Epub</string>
     <string name="reload_error">Retry connection…</string>
     <string name="download_text">Download</string>
     <string name="download">Download</string>
+    <string name="download_from_chapter">Partial download</string>
     <string name="download_ml">Download translation model</string>
     <string name="download_ml_long">To translate locally the app needs to download the translation model (~30MB)</string>
     <string name="novel_imagecover_descript">Novel Imagecover</string>
@@ -47,6 +49,26 @@
     <string name="select_chapter">Select Chapter</string>
     <string name="poster_descript">Poster</string>
     <string name="sort_downloads_descript">Sort Downloads</string>
+    <string name="search_roviders">Search Providers</string>
+
+    <string name="search">Search</string>
+    <string name="general">General</string>
+    <string name="info">Info</string>
+
+    <string name="advanced_search">Advanced Search</string>
+    <string name="advanced_search_desc">Gives you the search results separated by provider</string>
+    <string name="show_app_updates">Show app updates</string>
+    <string name="show_app_updates_desc">Automatically search for new updates on start</string>
+    <string name="external_reader">External reader</string>
+    <string name="external_reader_desc">Use an external app to read</string>
+    <string name="remove_bloat">Remove Bloat</string>
+    <string name="remove_bloat_desc">Removes the title and translator from all pages, will cause longer generation time</string>
+    <string name="check_for_update">Check for Update</string>
+    <string name="translating">Translating</string>
+
+
+
+
 
     <string name="filter_dialog_sort_by">Sort by</string>
     <string name="filter_dialog_filter">Apply</string>
@@ -171,6 +193,7 @@
     <string name="no_more_chapters">No more chapters</string>
     <string name="paused">Paused</string>
     <string name="stopped">Stopped</string>
+    <string name="stop">Stop</string>
     <string name="failed">Failed</string>
     <string name="done">Done</string>
     <string name="ongoing">Ongoing</string>
@@ -192,6 +215,7 @@
     <string name="update">Update</string>
     <string name="dont_show_again">Don\'t show again</string>
     <string name="downloaded">Downloaded</string>
+    <string name="manage">Manage</string>
     <string name="pause">Pause</string>
     <string name="resume">Resume</string>
     <string name="re_downloaded">Re-Download</string>
@@ -205,6 +229,7 @@
     <string name="download_sort">Download count</string>
     <string name="download_perc">Download percentage</string>
     <string name="recently_updated_sort">Recently updated</string>
+    <string name="chapter_sort">Chapter</string>
 
     <string name="alpha_sort_az">Alphabetical (A-Z)</string>
     <string name="alpha_sort_za">Alphabetical (Z-A)</string>
@@ -224,4 +249,37 @@
     <string name="sleep_format">%d min</string>
     <string name="sleep_format_stop">TTS will stop in %d min</string>
     <string name="google_translate">Google translate</string>
+    <string name="online_translate">Online translation</string>
+    <string name="start_chapter">Skipped chapters</string>
+    <string name="tts_speed">TTS Speed</string>
+    <string name="tts_pitch">TTS Pitch</string>
+    <string name="show_logcat_key" translatable="false">show_logcat_key</string>
+    <string name="close">Close</string>
+    <string name="clear">Clear</string>
+    <string name="copylog">Copy</string>
+    <string name="save">Save</string>
+    <string name="history">History</string>
+    <string name="explore">Explore</string>
+
+
+    <string name="toast_copied">copied!</string>
+    <string name="clipboard_too_large">Too much text. Unable to save to clipboard.</string>
+    <string name="clipboard_permission_error">Error accessing Clipboard, Please try again.</string>
+    <string name="clipboard_unknown_error">Error copying, Please copy logcat and contact app support.</string>
+    <string name="show_log_cat">Show Logcat 🐈</string>
+    <string name="unread">Unread</string>
+    <string name="bookmarks">Bookmarks</string>
+    <string name="read">Read</string>
+    <string name="import_epub">Import epub</string>
+    <string name="show_authors_notes">Show authors notes</string>
+
+    <!-- Some errors -->
+    <string name="connection_timeout">"Connection timeout\nPlease try again later."</string>
+    <string name="cannot_conect">Could not connect to the server, please try again later.</string>
+    <string name="error_loading">Error loading, please try again later.</string>
+    <string name="operation_no_implemented">This operation is not implemented.</string>
+    <string name="conection_error">Connection error.</string>
+
+
+
 </resources>
